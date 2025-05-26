@@ -17,9 +17,7 @@ static esp32_info_t esp32_info; // 非 const，全局结构体变量
 static void print_info_task(void* pvParameters)
 {
     while (1) {
-
         print_esp32_info(&esp32_info);
-
         vTaskDelay(pdMS_TO_TICKS(5000)); // 每5秒打印一次
     }
 }

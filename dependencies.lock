@@ -9,13 +9,24 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.4.2
+  espressif/supertinycron:
+    component_hash: e2ca975823708a5f72edba6333ec79e101a1e7d6e0112de9e3ac6a236af49a7b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.0.0~1
   idf:
     source:
       type: idf
     version: 5.4.1
 direct_dependencies:
 - 78/esp-wifi-connect
+- espressif/supertinycron
 - idf
-manifest_hash: 88feea8af68970f82582968b5d41c4191878cd558c405d97b4a2f3ea9df77a2a
+manifest_hash: cfc330335993a725771c99f700ec3fc8aee3791f433b7757c6a5f6c16aef7eb6
 target: esp32s2
 version: 2.0.0
