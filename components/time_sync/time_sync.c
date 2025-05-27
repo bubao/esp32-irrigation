@@ -21,7 +21,10 @@ static volatile bool time_synced = false;
 
 static void time_sync_notification_cb(struct timeval* tv)
 {
+    setenv("TZ", "CST-8", 1);
+    tzset();
     time_synced = true;
+
     ESP_LOGI(TAG, "Time synchronization event received");
 }
 
@@ -62,8 +65,7 @@ void time_sync_task(void* pvParameters)
     }
 
     if (time_synced || sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
-        setenv("TZ", "CST-8", 1);
-        tzset();
+
         time_t now;
         time(&now);
         struct tm timeinfo;
