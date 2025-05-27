@@ -1,14 +1,13 @@
+#include "cron.h"
 #include "driver/gpio.h"
 #include "esp32_info.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_schedule.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-#include "pump_tasks.h"
 #include "time_sync.h"
 #include "wifi_connect.h"
 #include <inttypes.h>
@@ -25,23 +24,33 @@ static void print_info_task(void* pvParameters)
     }
 }
 
+void example_cb(cron_job* job)
+{
+    // const char* msg = (const char*)job->data; // 使用 job->arg 获取传递的参数
+    // ESP_LOGI(TAG, "Task fired! message: %s", msg);
+    time_t now;
+    time(&now);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+
+    // 读取当前状态并取反
+    int level = gpio_get_level(GPIO_NUM_15);
+    ESP_LOGI("TAG", "gpio_get_level: %d Current time: %s", level, asctime(&timeinfo));
+
+    gpio_set_level(GPIO_NUM_15, level == 1 ? 0 : 1);
+}
+
 static void time_tasks(void* pvParameters)
 {
+    // esp_rom_gpio_pad_select_gpio(GPIO_NUM_15);
+    gpio_set_direction(GPIO_NUM_15, GPIO_MODE_INPUT_OUTPUT);
+    gpio_set_level(GPIO_NUM_15, 0);
     while (is_time_synced() == false) {
         // ESP_LOGI(TAG, "Waiting for time sync...");
         vTaskDelay(pdMS_TO_TICKS(1000)); // 每秒检查一次
     }
-
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_18", 5000, 1, 50);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_18", 5000, 1, 41);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 32);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 33);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 34);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 35);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 36);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 37);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 38);
-    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 39);
+    cron_job_create("10,30,50 * * * * *", example_cb, "Hello from cron!");
+    cron_start();
 
     while (1) {
         // 这里可以添加其他任务逻辑
@@ -71,7 +80,7 @@ void app_main(void)
         ESP_LOGI(TAG, "WiFi connected, starting time sync and info task.");
         get_esp32_info(&esp32_info);
 
-        xTaskCreate(print_info_task, "info_task", 2048, NULL, 5, NULL);
+        // xTaskCreate(print_info_task, "info_task", 2048, NULL, 5, NULL);
         xTaskCreate(time_sync_task, "sync_time_task", 4096, NULL, 5, NULL);
         xTaskCreate(time_tasks, "task", 4096, NULL, 5, NULL);
         while (true) {

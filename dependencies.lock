@@ -9,43 +9,13 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.4.2
-  espressif/esp_schedule:
-    component_hash: e202a9c688f7f1ab601efb91d682e4bcfaebc508dcceee1a1e0a0d2d1ca75a26
-    dependencies:
-    - name: espressif/rmaker_common
-      registry_url: https://components.espressif.com
-      require: private
-      version: ~1.4.2
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.2.0
-  espressif/rmaker_common:
-    component_hash: a3a1df881278d0351fc850b77792fe8a196ddd6dcacbea203d606329cc6a0239
-    dependencies: []
-    source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 1.4.6
-  espressif/supertinycron:
-    component_hash: e2ca975823708a5f72edba6333ec79e101a1e7d6e0112de9e3ac6a236af49a7b
-    dependencies:
-    - name: idf
-      require: private
-      version: '>=4.1'
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 2.0.0~1
   idf:
     source:
       type: idf
     version: 5.4.1
 direct_dependencies:
 - 78/esp-wifi-connect
-- espressif/esp_schedule
-- espressif/supertinycron
 - idf
-manifest_hash: 9d618f6efbfe49626c0eb3d44500509fd4689dce9bc5fd6dc46d00ae7c3ecac0
+manifest_hash: 88feea8af68970f82582968b5d41c4191878cd558c405d97b4a2f3ea9df77a2a
 target: esp32s2
 version: 2.0.0
