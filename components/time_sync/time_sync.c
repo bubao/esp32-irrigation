@@ -27,24 +27,21 @@ static void time_sync_notification_cb(struct timeval* tv)
 
 void time_sync_start(void)
 {
-    // 使用宏初始化配置，支持多个 NTP 服务器（最多5个）
     esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
-        5,
+        5, // 不超过 3 个就足够
         ESP_SNTP_SERVER_LIST(
-            ntp_servers[0],
-            ntp_servers[1],
-            ntp_servers[2],
-            ntp_servers[3],
-            ntp_servers[4]));
+            "cn.pool.ntp.org",
+            "ntp.aliyun.com",
+            "ntp.ntsc.ac.cn",
+            "cn.ntp.org.cn",
+            "pool.ntp.org", ));
 
     config.sync_cb = time_sync_notification_cb;
-    config.server_from_dhcp = true;
-    // config.start = false;
-    config.renew_servers_after_new_IP = true; // let esp-netif update the configured SNTP server(s) after receiving the DHCP lease
+    config.server_from_dhcp = false; // 建议关闭 DHCP 中的 NTP 覆盖
+    config.renew_servers_after_new_IP = true;
     config.ip_event_to_renew = IP_EVENT_STA_GOT_IP;
 
     esp_netif_sntp_init(&config);
-
     ESP_LOGI(TAG, "SNTP initialized with multiple servers");
 }
 
@@ -65,6 +62,8 @@ void time_sync_task(void* pvParameters)
     }
 
     if (time_synced || sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+        setenv("TZ", "CST-8", 1);
+        tzset();
         time_t now;
         time(&now);
         struct tm timeinfo;

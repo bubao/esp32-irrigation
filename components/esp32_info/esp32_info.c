@@ -75,27 +75,27 @@ void get_esp32_info(esp32_info_t* info)
 
 void print_esp32_info(const esp32_info_t* info)
 {
-    const char* chip_model = get_chip_model_name(info->chip_model);
-    ESP_LOGI("INFO", "Chip model: %s", chip_model);
-    ESP_LOGI("INFO", "Chip revision: %d.%d", info->major_rev, info->minor_rev);
-    ESP_LOGI("INFO", "Number of cores: %d", info->cores);
-    ESP_LOGI("INFO", "Supported protocols:");
-    if (info->wifi_bgn) {
-        ESP_LOGI("INFO", " - Wi-Fi (802.11 b/g/n)");
-    }
-    if (info->bt) {
-        ESP_LOGI("INFO", " - Bluetooth (BT)");
-    }
-    if (info->ble) {
-        ESP_LOGI("INFO", " - Bluetooth Low Energy (BLE)");
-    }
-    if (info->ieee802154) {
-        ESP_LOGI("INFO", " - IEEE 802.15.4");
-    }
-    ESP_LOGI("INFO", "Flash size: %" PRIu32 " MB", info->flash_size_mb);
-    ESP_LOGI("INFO", "Total heap size: %" PRIu32 " KB", info->total_heap_size / 1024);
-    ESP_LOGI("INFO", "Free heap size: %" PRIu32 " KB", info->free_heap_size / 1024);
-    ESP_LOGI("INFO", "Minimum free heap size: %" PRIu32 " KB", info->minimum_free_heap_size / 1024);
+    // const char* chip_model = get_chip_model_name(info->chip_model);
+    // ESP_LOGI("INFO", "Chip model: %s", chip_model);
+    // ESP_LOGI("INFO", "Chip revision: %d.%d", info->major_rev, info->minor_rev);
+    // ESP_LOGI("INFO", "Number of cores: %d", info->cores);
+    // ESP_LOGI("INFO", "Supported protocols:");
+    // if (info->wifi_bgn) {
+    //     ESP_LOGI("INFO", " - Wi-Fi (802.11 b/g/n)");
+    // }
+    // if (info->bt) {
+    //     ESP_LOGI("INFO", " - Bluetooth (BT)");
+    // }
+    // if (info->ble) {
+    //     ESP_LOGI("INFO", " - Bluetooth Low Energy (BLE)");
+    // }
+    // if (info->ieee802154) {
+    //     ESP_LOGI("INFO", " - IEEE 802.15.4");
+    // }
+    // ESP_LOGI("INFO", "Flash size: %" PRIu32 " MB", info->flash_size_mb);
+    // ESP_LOGI("INFO", "Total heap size: %" PRIu32 " KB", info->total_heap_size / 1024);
+    // ESP_LOGI("INFO", "Free heap size: %" PRIu32 " KB", info->free_heap_size / 1024);
+    // ESP_LOGI("INFO", "Minimum free heap size: %" PRIu32 " KB", info->minimum_free_heap_size / 1024);
     bool time_synced = is_time_synced();
     if (time_synced) {
         // 打印当前时间

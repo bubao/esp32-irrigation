@@ -1,11 +1,14 @@
+#include "driver/gpio.h"
 #include "esp32_info.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_schedule.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "pump_tasks.h"
 #include "time_sync.h"
 #include "wifi_connect.h"
 #include <inttypes.h>
@@ -19,6 +22,30 @@ static void print_info_task(void* pvParameters)
     while (1) {
         print_esp32_info(&esp32_info);
         vTaskDelay(pdMS_TO_TICKS(5000)); // 每5秒打印一次
+    }
+}
+
+static void time_tasks(void* pvParameters)
+{
+    while (is_time_synced() == false) {
+        // ESP_LOGI(TAG, "Waiting for time sync...");
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 每秒检查一次
+    }
+
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_18", 5000, 1, 50);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_18", 5000, 1, 41);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 32);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 33);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 34);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 35);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 36);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 37);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 38);
+    register_pump_schedule_task(GPIO_NUM_15, "Pump2_23", 5000, 1, 39);
+
+    while (1) {
+        // 这里可以添加其他任务逻辑
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 每秒执行一次
     }
 }
 
@@ -46,6 +73,10 @@ void app_main(void)
 
         xTaskCreate(print_info_task, "info_task", 2048, NULL, 5, NULL);
         xTaskCreate(time_sync_task, "sync_time_task", 4096, NULL, 5, NULL);
+        xTaskCreate(time_tasks, "task", 4096, NULL, 5, NULL);
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
     } else {
         ESP_LOGW(TAG, "Unknown WiFi mode.");
     }
