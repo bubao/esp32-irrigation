@@ -24,13 +24,18 @@
 
 1. 克隆本仓库到本地
 2. 使用 ESP-IDF 环境进行编译和烧录
-3. 通过或网页进行 WiFi 配网
+3. 通过串口或网页进行 WiFi 配网
 
 ## 未来计划
 
 - 完善定时任务功能
 - 支持多外设任务编排
 - 集成 MQTT 云端通信
+
+## 相关链接
+
+- [DavidMora/esp_cron](https://github.com/DavidMora/esp_cron)：定时任务
+- [78/esp-wifi-connect](https://github.com/78/esp-wifi-connect)：WiFi 配网
 
 ## 许可证
 
