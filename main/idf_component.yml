@@ -15,3 +15,5 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   78/esp-wifi-connect: ^2.4.2
+  georgik/lua: ^5.5.0~7
+  joltwallet/littlefs: ^1.20.0

@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hal/gpio_types.h"
+#include "lua_functions.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "pump_job.h"
@@ -48,6 +49,26 @@ static void time_tasks(void* pvParameters)
     }
 }
 
+static void lua_tasks(void* pvParameters)
+{
+    // 初始化SPIFFS文件系统
+    init_spiffs();
+
+    // 初始化Lua环境
+    lua_State* L = init_lua();
+
+    // 自动注册Lua规则文件
+    register_all_lua_scripts(L, "/assets");
+
+    // 启动Lua任务
+    start_lua_task(L);
+    while (1) {
+        // 这里可以添加其他Lua任务逻辑
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    lua_close(L);
+}
+
 void app_main(void)
 {
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -69,7 +90,7 @@ void app_main(void)
         ESP_LOGI(TAG, "WiFi连接成功，启动时间同步与任务调度");
 
         xTaskCreate(time_sync_task, "sync_time_task", 4096, NULL, 5, NULL);
-        xTaskCreate(time_tasks, "pump_timer_task", 4096, NULL, 5, NULL);
+        xTaskCreate(lua_tasks, "lua_tasks", 4096, NULL, 5, NULL);
     } else {
         ESP_LOGW(TAG, "未知 WiFi 连接模式");
     }
