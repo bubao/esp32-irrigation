@@ -4,13 +4,17 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hal/gpio_types.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "pump_job.h"
+#include "soc/gpio_num.h"
 #include "time_sync.h"
 #include "wifi_connect.h"
 
 static const char* TAG = "main";
+
+static gpio_num_t led_gpio = GPIO_NUM_15;
 
 static void time_tasks(void* pvParameters)
 {
@@ -29,6 +33,7 @@ static void time_tasks(void* pvParameters)
     }
 
     cron_job_create("0 0 8,18 * * *", job_task_cb, &job_config);
+    gpio_set_direction(led_gpio, GPIO_MODE_INPUT_OUTPUT);
 
     // 每分钟执行一次任务
     // cron_job_create("*/20 * * * * *", job_task_cb, &job_config);
@@ -36,6 +41,9 @@ static void time_tasks(void* pvParameters)
 
     while (1) {
         // 你可以在这里添加其他任务逻辑
+        gpio_set_level(led_gpio, 1);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        gpio_set_level(led_gpio, 0);
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
