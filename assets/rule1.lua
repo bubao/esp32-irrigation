@@ -1,17 +1,20 @@
--- main/rules/rule1.lua
--- 示例规则：当传感器读数超过阈值时，控制LED灯
-local sensor_threshold = 50
 
-co_rule1 = coroutine.create(function()
-    while true do
-        local sensor_value = read_sensor()
-        if sensor_value > sensor_threshold then
-            print("Rule1: Sensor value exceeded threshold: " .. sensor_value)
-            gpio.set_level(15, 1)  -- 打开LED
-        else
-            print("Rule1: Sensor value within threshold: " .. sensor_value)
-            gpio.set_level(15, 0)  -- 关闭LED
-        end
-        coroutine.yield()  -- 暂停协程
+pin = 15
+threshold = 50
+
+function setup()
+    -- 创建一个共享上下文table
+    gpio.set_mode(pin, gpio.MODE_INPUT_OUTPUT)
+end
+
+function loop()
+    local val = read_sensor()
+    if val > threshold then
+        gpio.set_level(pin, 1)
+    else
+        gpio.set_level(pin, 0)
     end
-end)
+	coroutine.yield()
+
+	settimeout(1000)  -- 每秒检查一次
+end

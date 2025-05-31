@@ -1,294 +1,224 @@
-// main/lua_functions.c
 #include "lua_functions.h"
+#include "lua_bindings.h"
+#include "lua_functions.h"
+
 #include "dirent.h"
 #include "driver/adc.h"
-#include "driver/gpio.h"
-#include "driver/mcpwm.h"
+#include "esp_littlefs.h"
 #include "esp_log.h"
 #include "esp_spi_flash.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "rom/gpio.h"
-#include "soc/gpio_num.h"
+#include <dirent.h>
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
-#include "esp_littlefs.h"
+static const char* TAG = "lua_system";
+LuaCoroutine coroutines[MAX_COROUTINES] = { 0 }; // 这里定义变量
+int coroutine_count = 0;
+#define MAX_PATH_LEN 256
+// #define MAX_COROUTINES 16
 
-static const char* TAG = "lua_functions";
+// typedef struct {
+//     lua_State* co;
+//     int is_active;
+//     int64_t wake_up_time_us; // 微秒时间戳
+// } LuaCoroutine;
 
-// Lua函数：初始化SPIFFS
-void init_spiffs()
+// static LuaCoroutine coroutines[MAX_COROUTINES] = { 0 };
+// static int coroutine_count = 0;
+
+static lua_State* global_L = NULL; // 主 Lua 状态机
+
+// LittleFS 文件系统初始化
+void init_littlefs()
 {
-    ESP_LOGI(TAG, "Initializing File System");
-
     esp_vfs_littlefs_conf_t conf = {
-        .base_path = LUA_FILE_PATH,
+        .base_path = "/assets",
         .partition_label = "assets",
-        .format_if_mount_failed = true,
-        .dont_mount = false,
+        .format_if_mount_failed = true
     };
 
-    esp_err_t err = esp_vfs_littlefs_register(&conf);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to mount or format filesystem");
+    esp_err_t ret = esp_vfs_littlefs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount or format filesystem: %s", esp_err_to_name(ret));
     } else {
-        ESP_LOGI(TAG, "Filesystem mounted at %s", LUA_FILE_PATH);
+        size_t total = 0, used = 0;
+        esp_littlefs_info("assets", &total, &used);
+        ESP_LOGI(TAG, "LittleFS mounted: total=%d, used=%d", total, used);
+    }
+}
+// 清空协程数组
+static void clear_coroutines()
+{
+    for (int i = 0; i < MAX_COROUTINES; i++) {
+        coroutines[i].co = NULL;
+    }
+    coroutine_count = 0;
+}
+
+// 加载单个脚本为协程，调用 setup 并加入数组
+// 加载单个脚本为协程，调用 setup，并把 loop 函数作为协程入口，加入数组
+static bool load_lua_rule_with_setup(lua_State* L, const char* path)
+{
+    lua_State* co = lua_newthread(L);
+    if (luaL_loadfile(co, path) != LUA_OK) {
+        ESP_LOGE(TAG, "Failed to load %s: %s", path, lua_tostring(co, -1));
+        lua_pop(co, 1);
+        return false;
+    }
+    if (lua_pcall(co, 0, 0, 0) != LUA_OK) {
+        ESP_LOGE(TAG, "Failed to run %s: %s", path, lua_tostring(co, -1));
+        lua_pop(co, 1);
+        return false;
     }
 
-    // 这里写一个示例，挂载成功后创建文件，确认文件系统可写
-    FILE* f = fopen("/assets/test.txt", "w");
-    if (f) {
-        fprintf(f, "Hello LittleFS\n");
-        fclose(f);
-        ESP_LOGI(TAG, "File created successfully");
+    lua_getglobal(co, "setup");
+    if (lua_isfunction(co, -1)) {
+        if (lua_pcall(co, 0, 0, 0) != LUA_OK) {
+            ESP_LOGE(TAG, "setup error in %s: %s", path, lua_tostring(co, -1));
+            lua_pop(co, 1);
+            return false;
+        }
     } else {
-        ESP_LOGE(TAG, "Failed to create file");
+        lua_pop(co, 1);
+    }
+
+    if (coroutine_count < MAX_COROUTINES) {
+        coroutines[coroutine_count].co = co;
+        coroutines[coroutine_count].is_active = 1;
+        coroutines[coroutine_count].wake_up_time_us = 0; // 立即可执行
+        coroutine_count++;
+        ESP_LOGI(TAG, "Loaded Lua rule: %s", path);
+        return true;
+    } else {
+        ESP_LOGW(TAG, "Max coroutines reached, skipping: %s", path);
+        return false;
     }
 }
 
-// Lua函数：设置GPIO模式
-static int l_gpio_set_mode(lua_State* L)
+// 加载目录下所有 .lua 脚本
+static void load_lua_rules(lua_State* L, const char* dir)
 {
-    gpio_num_t gpio_num = (gpio_num_t)luaL_checkinteger(L, 1);
-    gpio_mode_t mode = (gpio_mode_t)luaL_checkinteger(L, 2);
-    gpio_pad_select_gpio(gpio_num);
-    gpio_set_direction(gpio_num, (gpio_mode_t)mode);
-    return 0;
-}
-
-// Lua函数：设置GPIO电平
-static int l_gpio_set_level(lua_State* L)
-{
-    int gpio_num = luaL_checkinteger(L, 1);
-    int level = luaL_checkinteger(L, 2);
-    gpio_set_level(gpio_num, level);
-    return 0;
-}
-
-// Lua函数：读取GPIO电平
-static int l_gpio_get_level(lua_State* L)
-{
-    int gpio_num = luaL_checkinteger(L, 1);
-    int level = gpio_get_level(gpio_num);
-    lua_pushinteger(L, level);
-    return 1;
-}
-
-// Lua函数：设置PWM
-// static int l_pwm_set_duty(lua_State* L)
-// {
-//     int pwm_channel = luaL_checkinteger(L, 1);
-//     int duty = luaL_checkinteger(L, 2);
-//     mcpwm_set_duty(MCPWM_UNIT_0, (mcpwm_timer_t)pwm_channel, MCPWM_OPR_A, duty);
-//     return 0;
-// }
-
-// Lua函数：延时
-static int l_tmr_delay(lua_State* L)
-{
-    int us = luaL_checkinteger(L, 1);
-    esp_rom_delay_us(us);
-    return 0;
-}
-
-// Lua函数：读取ADC信号
-static int l_read_adc(lua_State* L)
-{
-    int adc_channel = luaL_checkinteger(L, 1);
-    adc1_channel_t channel = (adc1_channel_t)adc_channel;
-    int adc_value = adc1_get_raw(channel);
-    lua_pushinteger(L, adc_value);
-    return 1;
-}
-
-// Lua函数：读取文件内容
-static int l_file_read(lua_State* L)
-{
-    const char* filename = luaL_checkstring(L, 1);
-    FILE* file = fopen(filename, "r");
-    if (!file) {
-        lua_pushnil(L);
-        return 1;
+    DIR* d = opendir(dir);
+    if (!d) {
+        ESP_LOGE(TAG, "Failed to open directory: %s", dir);
+        return;
     }
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    char* buffer = (char*)malloc(size + 1);
-    fread(buffer, 1, size, file);
-    fclose(file);
-    buffer[size] = '\0';
-    lua_pushstring(L, buffer);
-    free(buffer);
-    return 1;
-}
 
-// Lua函数：写入文件内容
-static int l_file_write(lua_State* L)
-{
-    const char* filename = luaL_checkstring(L, 1);
-    const char* content = luaL_checkstring(L, 2);
-    FILE* file = fopen(filename, "w");
-    if (!file) {
-        lua_pushboolean(L, 0);
-        return 1;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (strstr(entry->d_name, ".lua")) {
+            char filepath[MAX_PATH_LEN] = { 0 };
+            // 先复制目录
+            strlcpy(filepath, dir, sizeof(filepath));
+
+            // 添加结尾斜杠（若没有）
+            size_t len = strlen(filepath);
+            if (filepath[len - 1] != '/') {
+                strlcat(filepath, "/", sizeof(filepath));
+            }
+
+            // 添加文件名
+            strlcat(filepath, entry->d_name, sizeof(filepath));
+
+            if (strlen(filepath) >= MAX_PATH_LEN - 1) {
+                ESP_LOGW(TAG, "路径过长，跳过: %s/%s", dir, entry->d_name);
+                continue;
+            }
+            ESP_LOGI(TAG, "加载 Lua 文件: %s", filepath);
+            load_lua_rule_with_setup(L, filepath);
+        }
     }
-    fwrite(content, 1, strlen(content), file);
-    fclose(file);
-    lua_pushboolean(L, 1);
-    return 1;
+    closedir(d);
 }
-
-// 模拟传感器读取
-int read_sensor()
+// 协程调度函数，resume每个协程（执行 loop 函数）
+// 每次调用lua_resume都会从loop的yield点继续
+static void lua_coroutine_task(void* pvParam)
 {
-    // 这里可以替换为实际的传感器读取代码
-    static int value = 0;
-    value = (value + 10) % 100; // 模拟传感器值变化
-    return value;
+    (void)pvParam;
+
+    while (1) {
+        for (int i = 0; i < coroutine_count; i++) {
+            lua_State* co = coroutines[i].co; // 取出协程指针
+            if (!co)
+                continue;
+
+            int nresults = 0;
+            int status = lua_resume(co, NULL, 0, &nresults);
+
+            if (status == LUA_YIELD) {
+                // loop 执行到 coroutine.yield()，正常挂起，等待下一次resume
+            } else if (status == LUA_OK) {
+                ESP_LOGI(TAG, "Coroutine %d loop finished, removing", i);
+                // loop 函数自然返回结束，清理
+                coroutines[i].co = NULL; // 把协程指针置空，表示该槽位可用
+                coroutines[i].is_active = 0; // 标记为未激活
+            } else {
+                ESP_LOGE(TAG, "Coroutine %d error: %s", i, lua_tostring(co, -1));
+                lua_pop(co, 1);
+                coroutines[i].co = NULL; // 把协程指针置空，表示该槽位可用
+                coroutines[i].is_active = 0; // 标记为未激活
+            }
+        }
+
+        // 清理已结束协程，压缩数组
+        int write_index = 0;
+        for (int read_index = 0; read_index < coroutine_count; read_index++) {
+            if (coroutines[read_index].co != NULL) {
+                coroutines[write_index++] = coroutines[read_index];
+            }
+        }
+        coroutine_count = write_index;
+
+        timer_process(global_L);
+
+        vTaskDelay(pdMS_TO_TICKS(10)); // 10ms 延迟，避免死循环烧CPU
+    }
 }
 
-lua_State* init_lua()
+// 初始化 Lua 全局环境（打开库、注册绑定等）
+static lua_State* init_lua()
 {
     lua_State* L = luaL_newstate();
-    if (L == NULL) {
-        ESP_LOGE(TAG, "无法创建Lua状态");
+    if (!L) {
+        ESP_LOGE(TAG, "Failed to create Lua state");
         return NULL;
     }
-
     luaL_openlibs(L);
 
-    // 创建gpio表
-    lua_newtable(L);
-
-    // 注册gpio.set_mode函数
-    lua_pushcfunction(L, l_gpio_set_mode);
-    lua_setfield(L, -2, "set_mode");
-
-    // 注册gpio.set_level函数
-    lua_pushcfunction(L, l_gpio_set_level);
-    lua_setfield(L, -2, "set_level");
-
-    // 注册gpio.get_level函数
-    lua_pushcfunction(L, l_gpio_get_level);
-    lua_setfield(L, -2, "get_level");
-
-    // 注册gpio常量
-    lua_pushinteger(L, GPIO_MODE_INPUT);
-    lua_setfield(L, -2, "MODE_INPUT");
-
-    lua_pushinteger(L, GPIO_MODE_OUTPUT);
-    lua_setfield(L, -2, "MODE_OUTPUT");
-
-    lua_pushinteger(L, GPIO_MODE_INPUT_OUTPUT);
-    lua_setfield(L, -2, "MODE_INPUT_OUTPUT");
-
-    lua_pushinteger(L, GPIO_MODE_INPUT_OUTPUT_OD);
-    lua_setfield(L, -2, "MODE_INPUT_OUTPUT_OD");
-
-    lua_pushinteger(L, GPIO_MODE_OUTPUT_OD);
-    lua_setfield(L, -2, "MODE_OUTPUT_OD");
-
-    lua_setglobal(L, "gpio");
-
-    // 创建pwm表
-    // lua_newtable(L);
-
-    // // 注册pwm.set_duty函数
-    // lua_pushcfunction(L, l_pwm_set_duty);
-    // lua_setfield(L, -2, "set_duty");
-
-    // lua_setglobal(L, "pwm");
-
-    // 注册read_adc函数
-    lua_register(L, "read_adc", l_read_adc);
-
-    // 注册file.read函数
-    lua_register(L, "file.read", l_file_read);
-
-    // 注册file.write函数
-    lua_register(L, "file.write", l_file_write);
-
-    // 初始化ADC
-    adc1_config_width(ADC_WIDTH_BIT_13);
-    adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_0); // 根据需要配置ADC通道
+    register_lua_bindings(L);
 
     return L;
 }
 
-void register_lua_script(lua_State* L, const char* filename)
+// 入口函数
+void start_lua_system()
 {
-    if (luaL_dofile(L, filename)) {
-        ESP_LOGE(TAG, "无法运行脚本: %s\n", lua_tostring(L, -1));
-        lua_pop(L, 1);
+    if (global_L) {
+        ESP_LOGW(TAG, "Lua system already started");
+        return;
     }
-}
-void lua_task(void* pvParameters)
-{
-    lua_State* L = (lua_State*)pvParameters;
 
-    while (1) {
-        if (lua_gettop(L) > 0) {
-            int nresults = 0;
-            int status = lua_resume(L, NULL, 0, &nresults);
-            if (status != LUA_YIELD && status != LUA_OK) {
-                ESP_LOGE(TAG, "Lua 脚本执行完毕或出错: %s", lua_tostring(L, -1));
-                lua_pop(L, 1); // 弹出错误信息
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_LOGI(TAG, "Starting Lua system...");
+
+    global_L = init_lua();
+    if (!global_L) {
+        ESP_LOGE(TAG, "Failed to initialize Lua");
+        return;
     }
-}
 
-void start_lua_task(lua_State* L)
-{
-    xTaskCreate(lua_task, "lua_task", 8192, L, 5, NULL);
-}
-#include "esp_log.h"
-#include <dirent.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+    clear_coroutines();
+    load_lua_rules(global_L, "/assets");
 
-#define MAX_PATH_LEN 256
+    // 创建协程调度任务
+    xTaskCreate(lua_coroutine_task, "lua_coroutine_task", 8192, NULL, 5, NULL);
 
-void register_all_lua_scripts(lua_State* L, const char* directory)
-{
-    DIR* dir;
-    struct dirent* ent;
-
-    if ((dir = opendir(directory)) != NULL) {
-        while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_type == DT_REG && strlen(ent->d_name) > 4 && strcmp(ent->d_name + strlen(ent->d_name) - 4, ".lua") == 0) {
-
-                char filepath[MAX_PATH_LEN] = { 0 };
-
-                // 先复制目录
-                strlcpy(filepath, directory, sizeof(filepath));
-
-                // 添加结尾斜杠（若没有）
-                size_t len = strlen(filepath);
-                if (filepath[len - 1] != '/') {
-                    strlcat(filepath, "/", sizeof(filepath));
-                }
-
-                // 添加文件名
-                strlcat(filepath, ent->d_name, sizeof(filepath));
-
-                if (strlen(filepath) >= MAX_PATH_LEN - 1) {
-                    ESP_LOGW(TAG, "路径过长，跳过: %s/%s", directory, ent->d_name);
-                    continue;
-                }
-
-                ESP_LOGI(TAG, "Registering Lua script: %s", filepath);
-                register_lua_script(L, filepath);
-            }
-        }
-        closedir(dir);
-    } else {
-        ESP_LOGE(TAG, "无法打开目录: %s", directory);
-    }
+    ESP_LOGI(TAG, "Lua system started");
 }
