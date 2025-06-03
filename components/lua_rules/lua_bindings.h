@@ -10,6 +10,14 @@ typedef struct {
     int64_t wake_up_time_us;
 } LuaCoroutine;
 
+typedef struct timer_task {
+    lua_State* co;
+    int64_t wakeup_time_ms;
+    struct timer_task* next;
+} timer_task_t;
+
+extern timer_task_t* timer_list;
+
 extern LuaCoroutine coroutines[MAX_COROUTINES];
 extern int coroutine_count;
 

@@ -14,5 +14,6 @@ function loop()
     else
         gpio.set_level(pin, 0)
     end
-    return settimeout(1000)  -- 每秒检查一次
+	settimeout(1000)
+    -- return   -- 每秒检查一次
 end

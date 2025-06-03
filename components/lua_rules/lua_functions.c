@@ -53,8 +53,6 @@ static void clear_coroutines()
     coroutine_count = 0;
 }
 
-// 加载单个脚本为协程，调用 setup 并加入数组
-// 加载单个脚本为协程，调用 setup，并把 loop 函数作为协程入口，加入数组
 static bool load_lua_rule_with_setup(lua_State* L, const char* path)
 {
     lua_State* co = lua_newthread(L);
@@ -63,54 +61,69 @@ static bool load_lua_rule_with_setup(lua_State* L, const char* path)
         return false;
     }
 
-    // 保持对主线程的引用
-    lua_getglobal(co, "coroutine");
-    if (lua_isnil(co, -1)) {
-        ESP_LOGE(TAG, "coroutine module not found in global environment of %s", path);
-        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
-        return false;
-    }
-
-    // 尝试加载文件
+    // 加载 Lua 文件为函数（不会执行）
     if (luaL_loadfile(co, path) != LUA_OK) {
         ESP_LOGE(TAG, "Failed to load %s: %s", path, lua_tostring(co, -1));
-        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
+        lua_pop(L, 1); // 弹出错误信息
         return false;
     }
 
-    // 先执行 Lua 文件，让 loop/setup 注册到全局
+    // 创建新的 _ENV 表
+    lua_newtable(co); // 新的 _ENV
+    lua_getglobal(co, "_G"); // 获取全局表
+    lua_setmetatable(co, -2); // 设置 _ENV 的元表为 _G
+
+    // 注册 settimeout/delay 到 _ENV
+    lua_pushthread(co);
+    lua_pushcclosure(co, l_settimeout, 1);
+    lua_setfield(co, -2, "settimeout");
+
+    lua_pushcfunction(co, l_delay);
+    lua_setfield(co, -2, "delay");
+
+    // 设置 _ENV 为 chunk 的第一个 upvalue前，先检测chunk是否有upvalue
+    int nup = lua_getupvalue(co, -2, 1) ? 1 : 0;
+    if (nup == 0) {
+        ESP_LOGE(TAG, "Lua chunk for %s has no upvalue, _ENV注入失败，检查文件首行是否为local _ENV = ...且无BOM/空行/注释", path);
+        lua_pop(co, 2); // 弹出 chunk 和 _ENV
+        return false;
+    }
+    lua_pop(co, 1); // pop getupvalue的结果
+    // 设置 _ENV 为 chunk 的第一个 upvalue
+    if (lua_setupvalue(co, -2, 1) == NULL) {
+        ESP_LOGE(TAG, "Failed to set _ENV upvalue in %s", path);
+        lua_pop(co, 2); // 弹出 chunk 和 _ENV
+        return false;
+    }
+
+    // 执行 chunk，执行后 _ENV 里应该有 setup/loop 函数
     if (lua_pcall(co, 0, 0, 0) != LUA_OK) {
         ESP_LOGE(TAG, "Failed to run %s: %s", path, lua_tostring(co, -1));
-        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
+        lua_pop(co, 1); // 弹出错误信息
         return false;
     }
 
-    // 调用 setup() 函数（如果存在）
-    lua_getglobal(co, "setup");
+    // 现在 _ENV 还在栈顶，获取其中的 setup() 函数
+    lua_getfield(co, -1, "setup");
     if (lua_isfunction(co, -1)) {
         if (lua_pcall(co, 0, 0, 0) != LUA_OK) {
             ESP_LOGE(TAG, "setup error in %s: %s", path, lua_tostring(co, -1));
-            lua_pop(L, 2); // 弹出 coroutine 和 function 参数
+            lua_pop(co, 1); // 弹出错误
             return false;
         }
+    } else {
+        lua_pop(co, 1); // 不是函数就弹掉
     }
 
-    // 注册 settimeout/delay，保证 upvalue 是协程自身
-    lua_pushthread(co);
-    lua_pushcclosure(co, l_settimeout, 1);
-    lua_setglobal(co, "settimeout");
-    lua_pushcfunction(co, l_delay);
-    lua_setglobal(co, "delay");
-
-    // 准备 loop() 函数作为协程的入口
-    lua_getglobal(co, "loop");
+    // 获取 loop() 作为主协程函数
+    lua_getfield(co, -1, "loop");
     if (!lua_isfunction(co, -1)) {
         ESP_LOGW(TAG, "loop() function not found in %s, skip coroutine", path);
-        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
-        return true; // 不报错，直接跳过
+        lua_pop(co, 1); // 弹出非函数
+        return true;
     }
 
-    // 注意，此时 loop() 在栈顶，下一次 resume 执行它
+    // loop() 函数已在栈顶，可以 resume 调用
     if (coroutine_count < MAX_COROUTINES) {
         coroutines[coroutine_count].co = co;
         coroutines[coroutine_count].is_active = 1;
@@ -120,6 +133,7 @@ static bool load_lua_rule_with_setup(lua_State* L, const char* path)
         return true;
     } else {
         ESP_LOGW(TAG, "Max coroutines reached, skipping: %s", path);
+        lua_pop(co, 1); // 弹出 loop 函数
         return false;
     }
 }
