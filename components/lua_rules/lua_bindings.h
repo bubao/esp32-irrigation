@@ -15,4 +15,8 @@ extern int coroutine_count;
 
 void register_lua_bindings(lua_State* L);
 void timer_process(lua_State* L);
+
+int l_settimeout(lua_State* L);
+int l_delay(lua_State* L);
+
 #endif // LUA_BINDINGS_H

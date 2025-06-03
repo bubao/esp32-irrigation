@@ -7,4 +7,7 @@
 void init_littlefs();
 void start_lua_task(lua_State *L);
 void start_lua_system();
+
+extern lua_State* global_L;
+
 #endif // LUA_FUNCTIONS_H

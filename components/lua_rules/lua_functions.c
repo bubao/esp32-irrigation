@@ -1,6 +1,5 @@
 #include "lua_functions.h"
 #include "lua_bindings.h"
-#include "lua_functions.h"
 
 #include "dirent.h"
 #include "driver/adc.h"
@@ -23,18 +22,8 @@ static const char* TAG = "lua_system";
 LuaCoroutine coroutines[MAX_COROUTINES] = { 0 }; // 这里定义变量
 int coroutine_count = 0;
 #define MAX_PATH_LEN 256
-// #define MAX_COROUTINES 16
 
-// typedef struct {
-//     lua_State* co;
-//     int is_active;
-//     int64_t wake_up_time_us; // 微秒时间戳
-// } LuaCoroutine;
-
-// static LuaCoroutine coroutines[MAX_COROUTINES] = { 0 };
-// static int coroutine_count = 0;
-
-static lua_State* global_L = NULL; // 主 Lua 状态机
+lua_State* global_L = NULL; // 主 Lua 状态机
 
 // LittleFS 文件系统初始化
 void init_littlefs()
@@ -54,6 +43,7 @@ void init_littlefs()
         ESP_LOGI(TAG, "LittleFS mounted: total=%d, used=%d", total, used);
     }
 }
+
 // 清空协程数组
 static void clear_coroutines()
 {
@@ -68,32 +58,63 @@ static void clear_coroutines()
 static bool load_lua_rule_with_setup(lua_State* L, const char* path)
 {
     lua_State* co = lua_newthread(L);
-    if (luaL_loadfile(co, path) != LUA_OK) {
-        ESP_LOGE(TAG, "Failed to load %s: %s", path, lua_tostring(co, -1));
-        lua_pop(co, 1);
-        return false;
-    }
-    if (lua_pcall(co, 0, 0, 0) != LUA_OK) {
-        ESP_LOGE(TAG, "Failed to run %s: %s", path, lua_tostring(co, -1));
-        lua_pop(co, 1);
+    if (!co) {
+        ESP_LOGE(TAG, "Failed to create Lua thread for %s", path);
         return false;
     }
 
+    // 保持对主线程的引用
+    lua_getglobal(co, "coroutine");
+    if (lua_isnil(co, -1)) {
+        ESP_LOGE(TAG, "coroutine module not found in global environment of %s", path);
+        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
+        return false;
+    }
+
+    // 尝试加载文件
+    if (luaL_loadfile(co, path) != LUA_OK) {
+        ESP_LOGE(TAG, "Failed to load %s: %s", path, lua_tostring(co, -1));
+        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
+        return false;
+    }
+
+    // 先执行 Lua 文件，让 loop/setup 注册到全局
+    if (lua_pcall(co, 0, 0, 0) != LUA_OK) {
+        ESP_LOGE(TAG, "Failed to run %s: %s", path, lua_tostring(co, -1));
+        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
+        return false;
+    }
+
+    // 调用 setup() 函数（如果存在）
     lua_getglobal(co, "setup");
     if (lua_isfunction(co, -1)) {
         if (lua_pcall(co, 0, 0, 0) != LUA_OK) {
             ESP_LOGE(TAG, "setup error in %s: %s", path, lua_tostring(co, -1));
-            lua_pop(co, 1);
+            lua_pop(L, 2); // 弹出 coroutine 和 function 参数
             return false;
         }
-    } else {
-        lua_pop(co, 1);
     }
 
+    // 注册 settimeout/delay，保证 upvalue 是协程自身
+    lua_pushthread(co);
+    lua_pushcclosure(co, l_settimeout, 1);
+    lua_setglobal(co, "settimeout");
+    lua_pushcfunction(co, l_delay);
+    lua_setglobal(co, "delay");
+
+    // 准备 loop() 函数作为协程的入口
+    lua_getglobal(co, "loop");
+    if (!lua_isfunction(co, -1)) {
+        ESP_LOGW(TAG, "loop() function not found in %s, skip coroutine", path);
+        lua_pop(L, 2); // 弹出 coroutine 和 function 参数
+        return true; // 不报错，直接跳过
+    }
+
+    // 注意，此时 loop() 在栈顶，下一次 resume 执行它
     if (coroutine_count < MAX_COROUTINES) {
         coroutines[coroutine_count].co = co;
         coroutines[coroutine_count].is_active = 1;
-        coroutines[coroutine_count].wake_up_time_us = 0; // 立即可执行
+        coroutines[coroutine_count].wake_up_time_us = 0;
         coroutine_count++;
         ESP_LOGI(TAG, "Loaded Lua rule: %s", path);
         return true;
@@ -103,7 +124,6 @@ static bool load_lua_rule_with_setup(lua_State* L, const char* path)
     }
 }
 
-// 加载目录下所有 .lua 脚本
 static void load_lua_rules(lua_State* L, const char* dir)
 {
     DIR* d = opendir(dir);
@@ -138,8 +158,7 @@ static void load_lua_rules(lua_State* L, const char* dir)
     }
     closedir(d);
 }
-// 协程调度函数，resume每个协程（执行 loop 函数）
-// 每次调用lua_resume都会从loop的yield点继续
+
 static void lua_coroutine_task(void* pvParam)
 {
     (void)pvParam;
@@ -152,19 +171,25 @@ static void lua_coroutine_task(void* pvParam)
 
             int nresults = 0;
             int status = lua_resume(co, NULL, 0, &nresults);
-
+            // 自动循环loop: 如果返回OK，尝试再次调用loop，直到yield或出错
+            while (status == LUA_OK) {
+                lua_getglobal(co, "loop");
+                if (!lua_isfunction(co, -1)) {
+                    ESP_LOGI(TAG, "Coroutine %d loop finished, removing", i);
+                    lua_pop(co, 1); // 清理栈顶，防止栈溢出
+                    coroutines[i].co = NULL;
+                    coroutines[i].is_active = 0;
+                    break;
+                }
+                status = lua_resume(co, NULL, 0, &nresults);
+            }
             if (status == LUA_YIELD) {
-                // loop 执行到 coroutine.yield()，正常挂起，等待下一次resume
-            } else if (status == LUA_OK) {
-                ESP_LOGI(TAG, "Coroutine %d loop finished, removing", i);
-                // loop 函数自然返回结束，清理
-                coroutines[i].co = NULL; // 把协程指针置空，表示该槽位可用
-                coroutines[i].is_active = 0; // 标记为未激活
-            } else {
+                // 正常挂起，等待下一次resume
+            } else if (status != LUA_OK) {
                 ESP_LOGE(TAG, "Coroutine %d error: %s", i, lua_tostring(co, -1));
                 lua_pop(co, 1);
-                coroutines[i].co = NULL; // 把协程指针置空，表示该槽位可用
-                coroutines[i].is_active = 0; // 标记为未激活
+                coroutines[i].co = NULL;
+                coroutines[i].is_active = 0;
             }
         }
 
@@ -177,13 +202,12 @@ static void lua_coroutine_task(void* pvParam)
         }
         coroutine_count = write_index;
 
-        timer_process(global_L);
+        // timer_process(global_L); // 禁止主动调用，只允许 esp_timer 定时调度
 
         vTaskDelay(pdMS_TO_TICKS(10)); // 10ms 延迟，避免死循环烧CPU
     }
 }
 
-// 初始化 Lua 全局环境（打开库、注册绑定等）
 static lua_State* init_lua()
 {
     lua_State* L = luaL_newstate();
@@ -198,7 +222,6 @@ static lua_State* init_lua()
     return L;
 }
 
-// 入口函数
 void start_lua_system()
 {
     if (global_L) {

@@ -25,89 +25,182 @@
 #include <sys/types.h>
 
 // Lua: settimeout(ms)
+static lua_State* loop_co = NULL; // 运行loop的协程
 
 typedef struct timer_task {
     lua_State* co;
-    int wakeup_time_ms;
+    int64_t wakeup_time_ms; // 改为 int64_t，防止溢出
     struct timer_task* next;
 } timer_task_t;
 
 static timer_task_t* timer_list = NULL;
 
-// settimeout(ms)，挂起当前协程，ms后恢复，按时间升序插入链表
-static int l_settimeout(lua_State* L)
-{
-    int ms = luaL_checkinteger(L, 1);
-    // 获取当前协程状态
-    lua_State* co = L;
+// 定时器句柄
+static esp_timer_handle_t lua_timer_handle = NULL;
 
-    // 找到对应协程记录，设置唤醒时间
-    int64_t now = esp_timer_get_time(); // 微秒
-    for (int i = 0; i < coroutine_count; i++) {
-        if (coroutines[i].co == co) {
-            coroutines[i].wake_up_time_us = now + ms * 1000;
-            break;
+// timer_process 的 esp_timer 回调
+static void lua_timer_callback(void* arg)
+{
+    extern lua_State* global_L;
+    timer_process(global_L);
+}
+
+LuaCoroutine* get_current_coroutine(lua_State* L)
+{
+    for (int i = 0; i < MAX_COROUTINES; i++) {
+        if (coroutines[i].co == L) {
+            return &coroutines[i];
         }
     }
+    return NULL;
+}
+int l_settimeout(lua_State* L)
+{
+    int ms = luaL_checkinteger(L, 1);
+    int64_t now_us = esp_timer_get_time();
 
-    // 挂起协程
+    // 获取当前协程
+    lua_State* co = lua_tothread(L, lua_upvalueindex(1)); // 取upvalue的协程线程
+    if (!co) {
+        co = L;
+    }
+    ESP_LOGI("LUA", "l_settimeout called, co=%p, ms=%d", co, ms);
+
+    // 防止主线程调用 settimeout
+    extern lua_State* global_L;
+    if (co == global_L) {
+        ESP_LOGE("SETTIMEOUT", "settimeout/delay cannot be called from main thread");
+        return luaL_error(L, "settimeout/delay cannot be called from main thread");
+    }
+
+    // 插入 timer_list 前，移除所有已有的同协程 timer_task，避免重复
+    timer_task_t** p = &timer_list;
+    while (*p) {
+        if ((*p)->co == co) {
+            timer_task_t* to_free = *p;
+            *p = (*p)->next;
+            free(to_free);
+            // 不 break，继续检查后续节点
+        } else {
+            p = &(*p)->next;
+        }
+    }
+    // 创建定时任务节点
+    timer_task_t* task = malloc(sizeof(timer_task_t));
+    if (!task) {
+        return luaL_error(L, "Out of memory");
+    }
+    task->co = co;
+    task->wakeup_time_ms = (now_us / 1000) + ms; // 不做 int 强转
+    ESP_LOGI("SETTIMEOUT", "settimeout: now_ms=%lld, delay=%d, wakeup_time_ms=%lld", now_us / 1000, ms, task->wakeup_time_ms);
+    ESP_LOGI("LUA", "l_settimeout called, co=%p", co);
+    task->next = NULL;
+
+    // 按升序插入链表
+    if (!timer_list || timer_list->wakeup_time_ms > task->wakeup_time_ms) {
+        task->next = timer_list;
+        timer_list = task;
+    } else {
+        timer_task_t* prev = timer_list;
+        while (prev->next && prev->next->wakeup_time_ms <= task->wakeup_time_ms) {
+            prev = prev->next;
+        }
+        task->next = prev->next;
+        prev->next = task;
+    }
+
+    // 挂起当前协程，返回给调用者
     return lua_yield(L, 0);
 }
 
-// 定时器轮询，唤醒过期协程（调用此函数需要在主循环或定时器任务里）
+// delay(ms) 函数，内部用settimeout实现，Lua接口改为 delay()
+int l_delay(lua_State* L)
+{
+    int ms = luaL_checkinteger(L, 1);
+    // 这里调用之前的 settimeout 实现逻辑
+    // 复用 l_settimeout 逻辑
+    return l_settimeout(L);
+}
+
+static int l_log(lua_State* L)
+{
+    const char* msg = luaL_checkstring(L, 1);
+    ESP_LOGI("LUA", "%s", msg);
+    return 0;
+}
+
+// 启动 loop 协程
+static void start_loop(lua_State* L)
+{
+    ESP_LOGI("LUA", "start_loop called");
+    if (loop_co) {
+        // 如果已存在协程，先释放
+        // luaL_unref(L, LUA_REGISTRYINDEX, loop_ref);
+        loop_co = NULL;
+    }
+    loop_co = lua_newthread(L); // 创建新协程
+
+    // 获取全局 loop 函数
+    lua_getglobal(loop_co, "loop");
+    if (!lua_isfunction(loop_co, -1)) {
+        ESP_LOGE("LOOP", "Lua function 'loop' not found");
+        lua_pop(loop_co, 1);
+        return;
+    }
+
+    // 启动协程执行
+    int nresults = 0;
+    int ret = lua_resume(loop_co, NULL, 0, &nresults);
+    if (ret == LUA_YIELD) {
+        // 挂起，协程里调用了 delay(ms)
+        int wakeup_ms = (int)lua_tointeger(loop_co, -1);
+        lua_pop(loop_co, 1);
+
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        // 插入定时器链表
+        timer_task_t* task = malloc(sizeof(timer_task_t));
+        task->co = loop_co;
+        task->wakeup_time_ms = now_ms + wakeup_ms;
+        task->next = NULL;
+
+        if (!timer_list || timer_list->wakeup_time_ms > task->wakeup_time_ms) {
+            task->next = timer_list;
+            timer_list = task;
+        } else {
+            timer_task_t* prev = timer_list;
+            while (prev->next && prev->next->wakeup_time_ms <= task->wakeup_time_ms) {
+                prev = prev->next;
+            }
+            task->next = prev->next;
+            prev->next = task;
+        }
+
+    } else if (ret == LUA_OK) {
+        // loop 函数执行完毕，重新启动 loop 协程，模拟 Arduino loop 无尽循环
+        start_loop(L);
+    } else {
+        const char* err = lua_tostring(loop_co, -1);
+        ESP_LOGE("LOOP", "loop coroutine error: %s", err);
+        lua_pop(loop_co, 1);
+    }
+}
+
+// 定时器轮询，唤醒过期协程
+// 定时器唤醒函数，放在定时器轮询中调用
 void timer_process(lua_State* L)
 {
-    int64_t now_us = esp_timer_get_time();
-    int now_ms = (int)(now_us / 1000);
-
-    timer_task_t* prev = NULL;
+    int64_t now_ms = esp_timer_get_time() / 1000;
     timer_task_t* curr = timer_list;
+    ESP_LOGI("TIMER", "timer_process: now_ms=%lld, curr=%p, wakeup_time_ms=%lld", now_ms, curr, curr ? curr->wakeup_time_ms : -1);
 
-    while (curr) {
-        if (curr->wakeup_time_ms <= now_ms) {
-            // 从链表移除curr节点
-            if (prev) {
-                prev->next = curr->next;
-            } else {
-                timer_list = curr->next;
-            }
-
+    if (curr && curr->wakeup_time_ms <= now_ms) {
+        timer_list = curr->next; // 移除链表头
+        if (curr->co) {
             int nresults = 0;
             int ret = lua_resume(curr->co, NULL, 0, &nresults);
-
-            if (ret == LUA_YIELD) {
-                // 协程还在挂起状态，重新加入链表尾部
-                timer_task_t* next = curr->next;
-                curr->next = NULL;
-
-                // 重新插入timer_list尾部
-                if (!timer_list) {
-                    timer_list = curr;
-                } else {
-                    timer_task_t* p = timer_list;
-                    while (p->next)
-                        p = p->next;
-                    p->next = curr;
-                }
-
-                curr = next;
-                // prev不变
-            } else {
-                // 协程结束或出错，释放task
-                if (ret != LUA_OK) {
-                    const char* err = lua_tostring(curr->co, -1);
-                    ESP_LOGE("TIMER", "Coroutine resume error: %s", err);
-                    lua_pop(curr->co, 1);
-                }
-                timer_task_t* to_free = curr;
-                curr = curr->next;
-                free(to_free);
-                // prev不变
-            }
-        } else {
-            prev = curr;
-            curr = curr->next;
+            ESP_LOGI("TIMER", "lua_resume ret=%d", ret);
         }
+        free(curr);
     }
 }
 
@@ -239,11 +332,9 @@ void register_lua_bindings(lua_State* L)
 
     lua_setglobal(L, "gpio");
 
-    lua_pushthread(L); // 当前线程作为upvalue
-    lua_pushcclosure(L, l_settimeout, 1);
-    // lua_register(L, "settimeout", l_settimeout);
-
-    lua_setglobal(L, "settimeout");
+    // lua_pushthread(L); // 当前协程线程
+    // lua_pushcclosure(L, l_settimeout, 1);
+    // lua_setglobal(L, "settimeout");
 
     // 创建pwm表
     // lua_newtable(L);
@@ -264,7 +355,27 @@ void register_lua_bindings(lua_State* L)
     lua_register(L, "file.write", l_file_write);
 
     lua_register(L, "read_sensor", l_read_sensor);
+
+    lua_register(L, "log", l_log);
+
+    // lua_pushcfunction(L, l_delay);
+    // lua_setglobal(L, "delay");
+
+    // start_loop(L);
     // 初始化ADC
     adc1_config_width(ADC_WIDTH_BIT_13);
     adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_0); // 根据需要配置ADC通道
+
+    // 启动 esp_timer 定时器，每 10ms 调用一次 timer_process
+    if (!lua_timer_handle) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = &lua_timer_callback,
+            .name = "lua_timer"
+        };
+        esp_timer_create(&timer_args, &lua_timer_handle);
+        esp_timer_start_periodic(lua_timer_handle, 10 * 1000); // 10ms
+    }
+
+    // 启动 loop 协程，只需启动一次
+    start_loop(L);
 }

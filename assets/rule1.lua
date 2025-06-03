@@ -1,4 +1,3 @@
-
 pin = 15
 threshold = 50
 
@@ -9,12 +8,11 @@ end
 
 function loop()
     local val = read_sensor()
+    -- log("Sensor value: " .. val)
     if val > threshold then
         gpio.set_level(pin, 1)
     else
         gpio.set_level(pin, 0)
     end
-	coroutine.yield()
-
-	settimeout(1000)  -- 每秒检查一次
+    return settimeout(1000)  -- 每秒检查一次
 end
